@@ -1,0 +1,90 @@
+edition = "2024"
+style_edition = "2024"
+required_version = ">=1.9.0"
+color = "Auto"
+
+hard_tabs = true
+tab_spaces = 4
+
+error_on_line_overflow = false
+error_on_unformatted = false
+show_parse_errors = true
+
+unstable_features = false
+disable_all_formatting = false
+skip_children = false
+generated_marker_line_search_limit = 5
+
+
+ignore = []
+skip_macro_invocations = []
+
+
+newline_style = "Unix"
+indent_style = "Block"
+binop_separator = "Front"
+brace_style = "SameLineWhere"
+control_brace_style = "AlwaysSameLine"
+fn_params_layout = "Tall"
+hex_literal_case = "Upper"
+float_literal_trailing_zero = "IfNoPostfix"
+imports_indent = "Block"
+imports_layout = "Mixed"
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
+match_arm_leading_pipes = "Never"
+trailing_comma = "Vertical"
+type_punctuation_density = "Wide"
+
+
+use_small_heuristics = "Off"
+max_width = 100
+array_width = 60
+attr_fn_like_width = 60 # 70
+blank_lines_lower_bound = 0
+blank_lines_upper_bound = 1
+chain_width = 60
+comment_width = 80
+doc_comment_code_block_width = 100
+fn_call_width = 60
+struct_lit_width = 35 # 18
+struct_variant_width = 35
+single_line_if_else_max_width = 60 # 50
+single_line_let_else_max_width = 60 # 50
+short_array_element_width_threshold = 10
+struct_field_align_threshold = 0
+enum_discrim_align_threshold = 10 # 0
+inline_attribute_width = 35 # 0
+
+
+combine_control_expr = true
+condense_wildcard_suffixes = false
+empty_item_single_line = true
+fn_single_line = true # false
+force_explicit_abi = true
+force_multiline_blocks = false
+format_code_in_doc_comments = false
+format_generated_files = false
+format_macro_matchers = true # false
+format_macro_bodies = true
+format_strings = false
+match_arm_blocks = true
+match_arm_indent = true
+match_block_trailing_comma = false
+merge_derives = true
+normalize_comments = true # false
+normalize_doc_attributes = false
+overflow_delimited_expr = true # false
+remove_nested_parens = true
+reorder_impl_items = true # false
+reorder_imports = true
+reorder_modules = true
+space_before_colon = false
+space_after_colon = true
+spaces_around_ranges = false
+struct_lit_single_line = true
+trailing_semicolon = false # true
+use_field_init_shorthand = true # false
+use_try_shorthand = true # false
+where_single_line = false
+wrap_comments = true # false
