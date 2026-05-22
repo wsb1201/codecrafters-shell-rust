@@ -6,106 +6,14 @@ use std::{
 	env,
 	ffi::OsStr,
 	fs,
-	io::{self, BufRead, Read, Write},
+	io::{self, BufRead, IsTerminal, Read, Write},
 	mem,
 	os::unix::prelude::*,
 	path::{Path, PathBuf},
 	process,
 };
 
-#[test]
-fn parse_test() {
-	// Consecutive spaces are collapsed unless quoted.
-	assert_eq!(
-		parse_line(r#"hello    world"#).as_slice(),
-		["hello", "world"]
-	);
-
-	// Spaces are preserved within quotes.
-	assert_eq!(
-		parse_line(r#"'hello    world'"#).as_slice(),
-		["hello    world"]
-	);
-
-	// Adjacent quoted strings 'hello' and 'world' are concatenated.
-	assert_eq!(parse_line(r#"'hello''world'"#).as_slice(), ["helloworld"]);
-
-	// Empty quotes '' are ignored.
-	assert_eq!(parse_line(r#"hello''world"#).as_slice(), ["helloworld"]);
-
-	// Spaces are preserved within double-quotes.
-	assert_eq!(
-		parse_line(r#""hello    world""#).as_slice(),
-		["hello    world"]
-	);
-
-	// Quoted strings next to each other are concatenated.
-	assert_eq!(parse_line(r#""hello""world""#).as_slice(), ["helloworld"]);
-
-	// Quoted and unquoted strings next to each other are concatenated.
-	assert_eq!(parse_line(r#""hello"world"#).as_slice(), ["helloworld"]);
-
-	// Separate arguments.
-	assert_eq!(
-		parse_line(r#""hello" "world""#).as_slice(),
-		["hello", "world"]
-	);
-
-	// Single quotes inside are literal.
-	assert_eq!(parse_line(r#""shell's test""#).as_slice(), ["shell's test"]);
-
-	// Each \ creates a literal space as part of one argument.
-	assert_eq!(
-		parse_line(r#"three\ \ \ spaces"#).as_slice(),
-		["three   spaces"]
-	);
-
-	// The backslash preserves the first space literally, but the shell collapses the subsequent unescaped spaces.
-	assert_eq!(
-		parse_line(r#"before\     after"#).as_slice(),
-		["before ", "after"]
-	);
-	assert_eq!(parse_line(r#"test\nexample"#).as_slice(), ["testnexample"]); // \n becomes just n.
-	assert_eq!(parse_line(r#"hello\\world"#).as_slice(), ["hello\\world"]); // The first backslash escapes the second, and the result is a single literal backslash in the argument.
-	assert_eq!(parse_line(r#"\'hello\'"#).as_slice(), ["'hello'"]); // \' makes the single quotes literal characters.
-
-	// Backslashes have no special escaping behavior inside single quotes.
-	// Every character (including backslashes) within single quotes is treated literally.
-	assert_eq!(
-		parse_line(r#"'multiple\\slashes'"#).as_slice(),
-		["multiple\\\\slashes"]
-	);
-	assert_eq!(
-		parse_line(r#"'every\"thing_is\"literal'"#).as_slice(),
-		["every\\\"thing_is\\\"literal"]
-	);
-
-	// Within double quotes, a backslash only escapes certain special characters:
-	//", \, $, `, and newline.
-	assert_eq!(
-		parse_line(r#""A \" inside double quotes""#).as_slice(),
-		["A \" inside double quotes"]
-	);
-	assert_eq!(
-		parse_line(r#""A \\ escapes itself""#).as_slice(),
-		["A \\ escapes itself"]
-	);
-	assert_eq!(
-		parse_line(r#""A \$ inside double quotes""#).as_slice(),
-		["A $ inside double quotes"]
-	);
-	assert_eq!(
-		parse_line(r#""A \` inside double quotes""#).as_slice(),
-		["A ` inside double quotes"]
-	);
-	// TODO: test newline escape in double quotes
-
-	// For all other characters, the backslash is treated literally.
-	assert_eq!(
-		parse_line(r#""A \ is treated \l\i\t\e\r\a\l\l\y""#).as_slice(),
-		[r#"A \ is treated \l\i\t\e\r\a\l\l\y"#]
-	);
-}
+mod termios;
 
 struct Command {
 	buf: Vec<String>,
@@ -202,17 +110,66 @@ fn parse_line(line: &str) -> Command {
 	Command { buf, stdout, stderr }
 }
 
+struct TermiosMode<'a> {
+	fd: BorrowedFd<'a>,
+	termios_orig: libc::termios,
+	termios_repl: libc::termios,
+}
+
+impl<'a> TermiosMode<'a> {
+	fn new(fd: BorrowedFd<'a>) -> io::Result<Self> {
+		let termios_orig = termios::tcgetattr(fd)?;
+
+		let mut t = termios_orig.clone();
+		t.c_lflag &= !(termios::ICANON | termios::ECHOCTL);
+		t.c_lflag |= termios::ECHO | termios::ISIG | termios::IEXTEN;
+		t.c_iflag |= termios::ICRNL;
+		t.c_oflag |= termios::OPOST;
+		t.c_cc[termios::VMIN] = 1;
+		t.c_cc[termios::VTIME] = 0;
+		termios::tcsetattr(fd, termios::TCSANOW, &t)?;
+
+		Ok(Self { fd, termios_orig, termios_repl: t })
+	}
+
+	fn set_repl_mode(&self) -> io::Result<()> {
+		termios::tcsetattr(self.fd, termios::TCSADRAIN, &self.termios_repl)
+	}
+
+	fn restore_orig(&self) -> io::Result<()> {
+		termios::tcsetattr(self.fd, termios::TCSADRAIN, &self.termios_orig)
+	}
+}
+
+impl Drop for TermiosMode<'_> {
+	fn drop(&mut self) {
+		_ = self.restore_orig();
+	}
+}
+
 fn main() -> io::Result<()> {
-	let (mut i, mut o, mut e) = (io::stdin().lock(), io::stdout().lock(), io::stderr().lock());
-	let mut cmdbuf = String::new();
+	let (i, mut o, mut e) = (io::stdin(), io::stdout(), io::stderr());
+	let termios_mode = i
+		.is_terminal()
+		.then(|| TermiosMode::new(i.as_fd()))
+		.transpose()?;
+
+	// Before forking/execing a child that should run with the normal tty (most external commands):
+	//
+	//     Option A (recommended): fork; in the child restore orig with tcsetattr(fd, TCSADRAIN, &orig) and then exec.
+	//     Option B: if you must restore in the parent, tcsetattr(fd, TCSADRAIN, &orig) before fork, fork/exec, then after child starts (or returns) reapply repl_mode in the parent. This is more race‑prone.
+	//
+	// After child exits: reapply repl_mode in the parent (tcsetattr(TCSADRAIN, &repl_mode)) before resuming line editing.
+	// On suspension (SIGTSTP) or exit: restore orig and ensure terminal state is consistent when the shell is resumed (handle SIGCONT to reapply repl_mode).
 
 	loop {
 		let mut cmd = {
 			write!(o, "$ ")?;
 			o.flush()?;
-			cmdbuf.clear();
-			_ = i.read_line(&mut cmdbuf)?;
-			parse_line(cmdbuf.as_str())
+			let mut buf = [0u8; 4096];
+			let n = io::stdin().lock().read(&mut buf)?;
+			let cmdbuf = str::from_utf8(&buf[..n]).expect("input should be UTF-8 encoded.");
+			parse_line(cmdbuf)
 		};
 
 		let working_dir = env::current_dir().expect("error getting the current working directory");
@@ -264,11 +221,15 @@ fn main() -> io::Result<()> {
 					.map(process::Stdio::from)
 					.unwrap_or(process::Stdio::inherit());
 
-				let _exit_status = process::Command::new(program)
-					.args(args)
-					.stdout(stdout)
-					.stderr(stderr)
-					.status()?;
+				let mut extcmd = process::Command::new(program);
+				extcmd.args(args).stdout(stdout).stderr(stderr);
+				if let Some(termios_mode) = &termios_mode {
+					_ = termios_mode.restore_orig();
+				}
+				let _exit_status = extcmd.status()?;
+				if let Some(termios_mode) = &termios_mode {
+					_ = termios_mode.set_repl_mode();
+				}
 			}
 
 			// unavailable command
@@ -365,4 +326,98 @@ fn builtin_cmd_type(o: &mut dyn Write, e: &mut dyn Write, args: &[&str]) -> io::
 		// No executable was found in PATH.
 		[unknown, ..] => writeln!(e, "{unknown}: not found"),
 	}
+}
+
+#[test]
+fn parse_test() {
+	// Consecutive spaces are collapsed unless quoted.
+	assert_eq!(
+		parse_line(r#"hello    world"#).as_slice(),
+		["hello", "world"]
+	);
+
+	// Spaces are preserved within quotes.
+	assert_eq!(
+		parse_line(r#"'hello    world'"#).as_slice(),
+		["hello    world"]
+	);
+
+	// Adjacent quoted strings 'hello' and 'world' are concatenated.
+	assert_eq!(parse_line(r#"'hello''world'"#).as_slice(), ["helloworld"]);
+
+	// Empty quotes '' are ignored.
+	assert_eq!(parse_line(r#"hello''world"#).as_slice(), ["helloworld"]);
+
+	// Spaces are preserved within double-quotes.
+	assert_eq!(
+		parse_line(r#""hello    world""#).as_slice(),
+		["hello    world"]
+	);
+
+	// Quoted strings next to each other are concatenated.
+	assert_eq!(parse_line(r#""hello""world""#).as_slice(), ["helloworld"]);
+
+	// Quoted and unquoted strings next to each other are concatenated.
+	assert_eq!(parse_line(r#""hello"world"#).as_slice(), ["helloworld"]);
+
+	// Separate arguments.
+	assert_eq!(
+		parse_line(r#""hello" "world""#).as_slice(),
+		["hello", "world"]
+	);
+
+	// Single quotes inside are literal.
+	assert_eq!(parse_line(r#""shell's test""#).as_slice(), ["shell's test"]);
+
+	// Each \ creates a literal space as part of one argument.
+	assert_eq!(
+		parse_line(r#"three\ \ \ spaces"#).as_slice(),
+		["three   spaces"]
+	);
+
+	// The backslash preserves the first space literally, but the shell collapses the subsequent unescaped spaces.
+	assert_eq!(
+		parse_line(r#"before\     after"#).as_slice(),
+		["before ", "after"]
+	);
+	assert_eq!(parse_line(r#"test\nexample"#).as_slice(), ["testnexample"]); // \n becomes just n.
+	assert_eq!(parse_line(r#"hello\\world"#).as_slice(), ["hello\\world"]); // The first backslash escapes the second, and the result is a single literal backslash in the argument.
+	assert_eq!(parse_line(r#"\'hello\'"#).as_slice(), ["'hello'"]); // \' makes the single quotes literal characters.
+
+	// Backslashes have no special escaping behavior inside single quotes.
+	// Every character (including backslashes) within single quotes is treated literally.
+	assert_eq!(
+		parse_line(r#"'multiple\\slashes'"#).as_slice(),
+		["multiple\\\\slashes"]
+	);
+	assert_eq!(
+		parse_line(r#"'every\"thing_is\"literal'"#).as_slice(),
+		["every\\\"thing_is\\\"literal"]
+	);
+
+	// Within double quotes, a backslash only escapes certain special characters:
+	//", \, $, `, and newline.
+	assert_eq!(
+		parse_line(r#""A \" inside double quotes""#).as_slice(),
+		["A \" inside double quotes"]
+	);
+	assert_eq!(
+		parse_line(r#""A \\ escapes itself""#).as_slice(),
+		["A \\ escapes itself"]
+	);
+	assert_eq!(
+		parse_line(r#""A \$ inside double quotes""#).as_slice(),
+		["A $ inside double quotes"]
+	);
+	assert_eq!(
+		parse_line(r#""A \` inside double quotes""#).as_slice(),
+		["A ` inside double quotes"]
+	);
+	// TODO: test newline escape in double quotes
+
+	// For all other characters, the backslash is treated literally.
+	assert_eq!(
+		parse_line(r#""A \ is treated \l\i\t\e\r\a\l\l\y""#).as_slice(),
+		[r#"A \ is treated \l\i\t\e\r\a\l\l\y"#]
+	);
 }
