@@ -5,7 +5,7 @@ use std::{
 	cell::{Cell, LazyCell},
 	env,
 	ffi::OsStr,
-	fs,
+	fmt, fs,
 	io::{self, BufRead, Read, Write},
 	mem,
 	os::unix::prelude::*,
@@ -15,119 +15,105 @@ use std::{
 
 #[test]
 fn parse_test() {
+	let parse_line = |s| {
+		parse_line(s)
+			.into_iter()
+			.filter_map(|f| match f {
+				Fragment::Word(s) => Some(s),
+				_ => None,
+			})
+			.collect::<Vec<_>>()
+	};
+
 	// Consecutive spaces are collapsed unless quoted.
-	assert_eq!(
-		parse_line(r#"hello    world"#).as_slice(),
-		["hello", "world"]
-	);
+	assert_eq!(parse_line(r#"hello    world"#), ["hello", "world"]);
 
 	// Spaces are preserved within quotes.
-	assert_eq!(
-		parse_line(r#"'hello    world'"#).as_slice(),
-		["hello    world"]
-	);
+	assert_eq!(parse_line(r#"'hello    world'"#), ["hello    world"]);
 
 	// Adjacent quoted strings 'hello' and 'world' are concatenated.
-	assert_eq!(parse_line(r#"'hello''world'"#).as_slice(), ["helloworld"]);
+	assert_eq!(parse_line(r#"'hello''world'"#), ["helloworld"]);
 
 	// Empty quotes '' are ignored.
-	assert_eq!(parse_line(r#"hello''world"#).as_slice(), ["helloworld"]);
+	assert_eq!(parse_line(r#"hello''world"#), ["helloworld"]);
 
 	// Spaces are preserved within double-quotes.
-	assert_eq!(
-		parse_line(r#""hello    world""#).as_slice(),
-		["hello    world"]
-	);
+	assert_eq!(parse_line(r#""hello    world""#), ["hello    world"]);
 
 	// Quoted strings next to each other are concatenated.
-	assert_eq!(parse_line(r#""hello""world""#).as_slice(), ["helloworld"]);
+	assert_eq!(parse_line(r#""hello""world""#), ["helloworld"]);
 
 	// Quoted and unquoted strings next to each other are concatenated.
-	assert_eq!(parse_line(r#""hello"world"#).as_slice(), ["helloworld"]);
+	assert_eq!(parse_line(r#""hello"world"#), ["helloworld"]);
 
 	// Separate arguments.
-	assert_eq!(
-		parse_line(r#""hello" "world""#).as_slice(),
-		["hello", "world"]
-	);
+	assert_eq!(parse_line(r#""hello" "world""#), ["hello", "world"]);
 
 	// Single quotes inside are literal.
-	assert_eq!(parse_line(r#""shell's test""#).as_slice(), ["shell's test"]);
+	assert_eq!(parse_line(r#""shell's test""#), ["shell's test"]);
 
 	// Each \ creates a literal space as part of one argument.
-	assert_eq!(
-		parse_line(r#"three\ \ \ spaces"#).as_slice(),
-		["three   spaces"]
-	);
+	assert_eq!(parse_line(r#"three\ \ \ spaces"#), ["three   spaces"]);
 
 	// The backslash preserves the first space literally, but the shell collapses the subsequent unescaped spaces.
-	assert_eq!(
-		parse_line(r#"before\     after"#).as_slice(),
-		["before ", "after"]
-	);
-	assert_eq!(parse_line(r#"test\nexample"#).as_slice(), ["testnexample"]); // \n becomes just n.
-	assert_eq!(parse_line(r#"hello\\world"#).as_slice(), ["hello\\world"]); // The first backslash escapes the second, and the result is a single literal backslash in the argument.
-	assert_eq!(parse_line(r#"\'hello\'"#).as_slice(), ["'hello'"]); // \' makes the single quotes literal characters.
+	assert_eq!(parse_line(r#"before\     after"#), ["before ", "after"]);
+	assert_eq!(parse_line(r#"test\nexample"#), ["testnexample"]); // \n becomes just n.
+	assert_eq!(parse_line(r#"hello\\world"#), ["hello\\world"]); // The first backslash escapes the second, and the result is a single literal backslash in the argument.
+	assert_eq!(parse_line(r#"\'hello\'"#), ["'hello'"]); // \' makes the single quotes literal characters.
 
 	// Backslashes have no special escaping behavior inside single quotes.
 	// Every character (including backslashes) within single quotes is treated literally.
 	assert_eq!(
-		parse_line(r#"'multiple\\slashes'"#).as_slice(),
+		parse_line(r#"'multiple\\slashes'"#),
 		["multiple\\\\slashes"]
 	);
 	assert_eq!(
-		parse_line(r#"'every\"thing_is\"literal'"#).as_slice(),
+		parse_line(r#"'every\"thing_is\"literal'"#),
 		["every\\\"thing_is\\\"literal"]
 	);
 
 	// Within double quotes, a backslash only escapes certain special characters:
 	//", \, $, `, and newline.
 	assert_eq!(
-		parse_line(r#""A \" inside double quotes""#).as_slice(),
+		parse_line(r#""A \" inside double quotes""#),
 		["A \" inside double quotes"]
 	);
 	assert_eq!(
-		parse_line(r#""A \\ escapes itself""#).as_slice(),
+		parse_line(r#""A \\ escapes itself""#),
 		["A \\ escapes itself"]
 	);
 	assert_eq!(
-		parse_line(r#""A \$ inside double quotes""#).as_slice(),
+		parse_line(r#""A \$ inside double quotes""#),
 		["A $ inside double quotes"]
 	);
 	assert_eq!(
-		parse_line(r#""A \` inside double quotes""#).as_slice(),
+		parse_line(r#""A \` inside double quotes""#),
 		["A ` inside double quotes"]
 	);
 	// TODO: test newline escape in double quotes
 
 	// For all other characters, the backslash is treated literally.
 	assert_eq!(
-		parse_line(r#""A \ is treated \l\i\t\e\r\a\l\l\y""#).as_slice(),
+		parse_line(r#""A \ is treated \l\i\t\e\r\a\l\l\y""#),
 		[r#"A \ is treated \l\i\t\e\r\a\l\l\y"#]
 	);
 }
 
-struct Command {
-	buf: Vec<String>,
-	stdout: Option<PathBuf>,
-	stderr: Option<PathBuf>,
+enum Fragment {
+	Word(String),
+	RedirectFd {
+		fd: RawFd,
+		path: PathBuf,
+		truncate: bool,
+	},
 }
 
-impl Command {
-	pub const fn as_slice(&self) -> &[String] {
-		self.buf.as_slice()
-	}
-}
-
-fn parse_line(line: &str) -> Command {
+fn parse_line(line: &str) -> Vec<Fragment> {
 	let mut src = line.trim();
 	let mut buf = vec![];
 	let mut wrd = String::new();
 
 	let mut meta = None;
-
-	let mut stdout = None;
-	let mut stderr = None;
 
 	/// A character that, when unquoted, separates words.
 	const META_CHARS: &[char] = &[' ', '\t', '\n', '(', ')', '<', '>', '|', '&', ';'];
@@ -145,15 +131,39 @@ fn parse_line(line: &str) -> Command {
 			let wrd = mem::take(&mut wrd);
 
 			match meta.take() {
-				Some("1>") => stdout = Some(wrd.into()),
-				Some("2>") => stderr = Some(wrd.into()),
+				Some("1>") => buf.push(Fragment::RedirectFd {
+					fd: 1,
+					path: wrd.into(),
+					truncate: true,
+				}),
+				Some("2>") => buf.push(Fragment::RedirectFd {
+					fd: 2,
+					path: wrd.into(),
+					truncate: true,
+				}),
+				Some("1>>") => buf.push(Fragment::RedirectFd {
+					fd: 1,
+					path: wrd.into(),
+					truncate: false,
+				}),
+				Some("2>>") => buf.push(Fragment::RedirectFd {
+					fd: 2,
+					path: wrd.into(),
+					truncate: false,
+				}),
 				Some(_) => unreachable!(),
-				None => buf.push(wrd),
+				None => buf.push(Fragment::Word(wrd)),
 			}
 
 			if src.is_empty() {
 				break;
 			}
+		} else if let Some(sub) = src.strip_prefix("1>>").or_else(|| src.strip_prefix(">>")) {
+			src = sub;
+			meta = Some("1>>")
+		} else if let Some(sub) = src.strip_prefix("2>>") {
+			src = sub;
+			meta = Some("2>>")
 		} else if let Some(sub) = src.strip_prefix("1>").or_else(|| src.strip_prefix('>')) {
 			src = sub;
 			meta = Some("1>")
@@ -199,7 +209,16 @@ fn parse_line(line: &str) -> Command {
 		}
 	}
 
-	Command { buf, stdout, stderr }
+	buf
+}
+
+fn create_redirection_target(path: impl AsRef<Path>, truncate: bool) -> io::Result<fs::File> {
+	fs::OpenOptions::new()
+		.create(true)
+		.write(true)
+		.truncate(truncate)
+		.append(!truncate)
+		.open(path)
 }
 
 fn main() -> io::Result<()> {
@@ -207,7 +226,7 @@ fn main() -> io::Result<()> {
 	let mut cmdbuf = String::new();
 
 	loop {
-		let mut cmd = {
+		let cmd = {
 			write!(o, "$ ")?;
 			o.flush()?;
 			cmdbuf.clear();
@@ -217,12 +236,27 @@ fn main() -> io::Result<()> {
 
 		let working_dir = env::current_dir().expect("error getting the current working directory");
 
-		let mut stdout_f = (cmd.stdout.take())
-			.map(|path| fs::File::create(path))
+		let mut stdout_f = cmd
+			.iter()
+			.filter_map(|f| match f {
+				Fragment::RedirectFd { fd: 1, path, truncate } => {
+					Some(create_redirection_target(path, *truncate))
+				}
+				_ => None,
+			})
+			.last()
 			.transpose()
 			.unwrap();
-		let mut stderr_f = (cmd.stderr.take())
-			.map(|path| fs::File::create(path))
+
+		let mut stderr_f = cmd
+			.iter()
+			.filter_map(|f| match f {
+				Fragment::RedirectFd { fd: 2, path, truncate } => {
+					Some(create_redirection_target(path, *truncate))
+				}
+				_ => None,
+			})
+			.last()
 			.transpose()
 			.unwrap();
 
@@ -230,9 +264,11 @@ fn main() -> io::Result<()> {
 		let mut e: &mut dyn Write = stderr_f.as_mut().map_or(&mut e, |f| f);
 
 		match &cmd
-			.as_slice()
 			.iter()
-			.map(|s| s.as_ref())
+			.filter_map(|f| match f {
+				Fragment::Word(s) => Some(s.as_str()),
+				_ => None,
+			})
 			.collect::<Vec<_>>()[..]
 		{
 			[] => continue,
