@@ -6,12 +6,15 @@ use std::{
 	env,
 	ffi::OsStr,
 	fmt, fs,
-	io::{self, BufRead, Read, Write},
+	io::{self, BufRead, IsTerminal, Read, Write},
 	mem,
 	os::unix::prelude::*,
 	path::{Path, PathBuf},
 	process,
 };
+
+mod interactive;
+mod termios;
 
 #[test]
 fn parse_test() {
@@ -221,16 +224,53 @@ fn create_redirection_target(path: impl AsRef<Path>, truncate: bool) -> io::Resu
 		.open(path)
 }
 
+struct TermiosMode<'a> {
+	fd: BorrowedFd<'a>,
+	termios_orig: libc::termios,
+	termios_repl: libc::termios,
+}
+
+impl<'a> TermiosMode<'a> {
+	fn new(fd: BorrowedFd<'a>) -> io::Result<Self> {
+		let termios_orig = termios::tcgetattr(fd)?;
+
+		let mut t = termios_orig.clone();
+		t.c_lflag &= !(termios::ICANON | termios::ECHO | termios::ECHOCTL);
+		t.c_lflag |= termios::ISIG | termios::IEXTEN;
+		t.c_iflag |= termios::ICRNL;
+		t.c_oflag |= termios::OPOST;
+		t.c_cc[termios::VMIN] = 1;
+		t.c_cc[termios::VTIME] = 0;
+		termios::tcsetattr(fd, termios::TCSANOW, &t)?;
+
+		Ok(Self { fd, termios_orig, termios_repl: t })
+	}
+
+	fn set_repl_mode(&self) -> io::Result<()> {
+		termios::tcsetattr(self.fd, termios::TCSADRAIN, &self.termios_repl)
+	}
+
+	fn restore_orig(&self) -> io::Result<()> {
+		termios::tcsetattr(self.fd, termios::TCSADRAIN, &self.termios_orig)
+	}
+}
+
+impl Drop for TermiosMode<'_> {
+	fn drop(&mut self) {
+		_ = self.restore_orig();
+	}
+}
+
 fn main() -> io::Result<()> {
-	let (mut i, mut o, mut e) = (io::stdin().lock(), io::stdout().lock(), io::stderr().lock());
-	let mut cmdbuf = String::new();
+	let (i, mut o, mut e) = (io::stdin(), io::stdout(), io::stderr());
+	let termios_mode = i
+		.is_terminal()
+		.then(|| TermiosMode::new(i.as_fd()))
+		.transpose()?;
 
 	loop {
-		let cmd = {
-			write!(o, "$ ")?;
-			o.flush()?;
-			cmdbuf.clear();
-			_ = i.read_line(&mut cmdbuf)?;
+		let mut cmd = {
+			let cmdbuf = interactive::next()?;
 			parse_line(cmdbuf.as_str())
 		};
 
@@ -300,11 +340,15 @@ fn main() -> io::Result<()> {
 					.map(process::Stdio::from)
 					.unwrap_or(process::Stdio::inherit());
 
-				let _exit_status = process::Command::new(program)
-					.args(args)
-					.stdout(stdout)
-					.stderr(stderr)
-					.status()?;
+				let mut extcmd = process::Command::new(program);
+				extcmd.args(args).stdout(stdout).stderr(stderr);
+				if let Some(termios_mode) = &termios_mode {
+					_ = termios_mode.restore_orig();
+				}
+				let _exit_status = extcmd.status()?;
+				if let Some(termios_mode) = &termios_mode {
+					_ = termios_mode.set_repl_mode();
+				}
 			}
 
 			// unavailable command
