@@ -262,7 +262,6 @@ pub fn next() -> io::Result<String> {
 					b'\n' => {
 						// ENTER
 						writeln!(o)?; // Move down to the left column on the next line.
-						writeln!(o, "{buf}")?; // Echo input.
 						let ret = buf.to_string();
 						buf.clear();
 						return Ok(ret);
