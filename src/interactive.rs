@@ -279,9 +279,13 @@ pub fn next(completions: &crate::trie::Trie) -> io::Result<String> {
 								.strip_prefix(prefix)
 								.expect("completion should start with previous content");
 							buf.insert_str(extra);
-
 							write!(o, "{extra}")?;
 							refresh = true;
+
+							if buf.is_cursor_at_end() {
+								buf.insert(' ');
+								write!(o, " ")?;
+							}
 						} else {
 							// TODO: suggest tab completion
 							// write!(o, "\x1B7")?;
