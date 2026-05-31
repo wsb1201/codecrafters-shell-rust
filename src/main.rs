@@ -15,6 +15,7 @@ use std::{
 
 mod interactive;
 mod termios;
+mod trie;
 
 #[test]
 fn parse_test() {
@@ -119,7 +120,7 @@ fn parse_line(line: &str) -> Vec<Fragment> {
 	let mut meta = None;
 
 	/// A character that, when unquoted, separates words.
-	const META_CHARS: &[char] = &[' ', '\t', '\n', '(', ')', '<', '>', '|', '&', ';'];
+	const _META_CHARS: &[char] = &[' ', '\t', '\n', '(', ')', '<', '>', '|', '&', ';'];
 
 	'l: loop {
 		if src.is_empty() || src.starts_with([' ', '\t']) {
@@ -268,9 +269,13 @@ fn main() -> io::Result<()> {
 		.then(|| TermiosMode::new(i.as_fd()))
 		.transpose()?;
 
+	let mut completions = trie::Trie::new();
+	completions.insert("exit".into());
+	completions.insert("echo".into());
+
 	loop {
-		let mut cmd = {
-			let cmdbuf = interactive::next()?;
+		let cmd = {
+			let cmdbuf = interactive::next(&completions)?;
 			parse_line(cmdbuf.as_str())
 		};
 

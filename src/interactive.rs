@@ -127,6 +127,11 @@ impl Buffer {
 		doit
 	}
 
+	fn insert_str(&mut self, s: &str) {
+		self.buf.insert_str(self.idx, s);
+		self.idx += s.len();
+	}
+
 	const fn len(&self) -> usize {
 		self.buf.len()
 	}
@@ -141,7 +146,7 @@ impl Buffer {
 	}
 }
 
-pub fn next() -> io::Result<String> {
+pub fn next(completions: &crate::trie::Trie) -> io::Result<String> {
 	let mut input = Input::new(io::stdin().lock()).peekable();
 	let mut o = io::stdout().lock();
 
@@ -250,13 +255,6 @@ pub fn next() -> io::Result<String> {
 			}
 
 			if ch < '\x20' {
-				if ch == '\x1B' && input.next_if(|&ch| ch == '[').is_some() {
-					csi = Some(String::new());
-					continue;
-				} else if ch == '\t' {
-					continue;
-				}
-
 				// ASCII C0
 				match ch as u8 {
 					b'\n' => {
@@ -268,10 +266,40 @@ pub fn next() -> io::Result<String> {
 					}
 
 					b'\t' => {
-						write!(o, "\x07")?;
-						_ = o.flush();
+						let prefix = &buf.as_str()[..buf.idx];
+						let comp = completions.complete(prefix);
 
-						// TODO: tab completion
+						if comp.is_empty() {
+							write!(o, "\x07")?;
+							_ = o.flush();
+						} else if let &[comp] = comp.as_slice()
+							&& comp != prefix
+						{
+							let extra = comp
+								.strip_prefix(prefix)
+								.expect("completion should start with previous content");
+							buf.insert_str(extra);
+
+							write!(o, "{extra}")?;
+							refresh = true;
+						} else {
+							// TODO: suggest tab completion
+							// write!(o, "\x1B7")?;
+							// write!(o, "\n")?;
+							//
+							// eprintln!("{comp:?}");
+							//
+							// write!(o, "\x1B[K")?;
+							// write!(o, "$ {buf}")?;
+							// write!(o, "\x1B8")?;
+							// _ = o.flush();
+							write!(o, "\x07")?;
+							_ = o.flush();
+						}
+					}
+
+					b'\x1B' if input.next_if(|&ch| ch == '[').is_some() => {
+						csi = Some(String::new());
 					}
 
 					b'\r' => (),      // Move to column zero while staying on the same line.
@@ -287,6 +315,7 @@ pub fn next() -> io::Result<String> {
 					0x1C..0x20 => (), // Does nothing.
 					_ => unreachable!(),
 				}
+
 				continue;
 			}
 
