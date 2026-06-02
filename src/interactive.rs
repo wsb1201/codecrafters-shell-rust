@@ -258,8 +258,7 @@ pub fn next(completions: &crate::trie::Trie) -> io::Result<String> {
 				// ASCII C0
 				match ch as u8 {
 					b'\n' => {
-						// ENTER
-						writeln!(o)?; // Move down to the left column on the next line.
+						writeln!(o)?;
 						let ret = buf.to_string();
 						buf.clear();
 						return Ok(ret);
@@ -273,53 +272,57 @@ pub fn next(completions: &crate::trie::Trie) -> io::Result<String> {
 							continue;
 						};
 
-						if let Some(comp) = min.value()
-							&& comp != prefix
-						{
-							let extra = comp
-								.strip_prefix(prefix)
-								.expect("completion should start with previous content");
+						if let Some(s) = min.value() {
+							let extra = s.strip_prefix(prefix).unwrap();
 							buf.insert_str(extra);
 							write!(o, "{extra}")?;
-							refresh = true;
 
-							if min.is_leaf() && buf.is_cursor_at_end() {
+							if !buf.is_cursor_at_end() {
+								write!(o, "\x1B7")?;
+								write!(o, "\x1B[K")?;
+								write!(o, "{}", &buf.as_str()[buf.idx..])?;
+								write!(o, "\x1B8")?;
+								refresh = false;
+							} else if min.is_leaf() {
 								buf.insert(' ');
 								write!(o, " ")?;
 							}
-							continue;
+
+							if min.is_leaf() {
+								_ = o.flush();
+								continue;
+							}
 						}
 
 						write!(o, "\x07")?;
 						_ = o.flush();
 
-						if input.next_if(|&ch| ch == '\t').is_none() {
-							continue;
-						}
+						while input.next_if(|&ch| ch == '\t').is_some() {
+							let comp = min.collect_values();
+							debug_assert!(comp.len() > 1);
 
-						let comp = min.collect_values();
-						debug_assert!(comp.len() > 1);
+							write!(o, "\x1B7")?;
+							{
+								writeln!(o)?;
 
-						write!(o, "\x1B7")?;
-						{
-							writeln!(o)?;
-							let width = 2 + comp.iter().map(|&s| s.len()).max().unwrap();
-							let mut sum = 0;
-							for i in comp {
-								// TODO: dynamic terminal line width
-								if sum + width >= 80 {
-									writeln!(o)?;
-									sum = 0;
+								let width = 2 + comp.iter().map(|&s| s.len()).max().unwrap();
+								let mut sum = 0;
+								for i in comp {
+									// TODO: dynamic terminal line width
+									if sum + width >= 80 {
+										writeln!(o)?;
+										sum = 0;
+									}
+									write!(o, "{i:width$}")?;
+									sum += width;
 								}
-								write!(o, "{i:width$}")?;
-								sum += width;
+								writeln!(o)?;
 							}
-							writeln!(o)?;
+							write!(o, "\x1B[K")?;
+							write!(o, "$ {buf}")?;
+							write!(o, "\x1B8")?;
+							_ = o.flush();
 						}
-						write!(o, "\x1B[K")?;
-						write!(o, "$ {buf}")?;
-						write!(o, "\x1B8")?;
-						_ = o.flush();
 					}
 
 					b'\x1B' if input.next_if(|&ch| ch == '[').is_some() => {
@@ -358,7 +361,7 @@ pub fn next(completions: &crate::trie::Trie) -> io::Result<String> {
 			write!(o, "{ch}")?;
 			_ = o.flush();
 
-			if buf.insert(ch) && buf.idx < buf.len() {
+			if buf.insert(ch) && !buf.is_cursor_at_end() {
 				refresh = true;
 			}
 		}

@@ -72,10 +72,11 @@ impl Trie {
 			}
 			n = &n.children[n.index(key)];
 		}
-		while let [single] = n.children.as_slice() {
-			if single.children.len() < 2 {
-				n = single;
-			} else {
+		while n.value.is_empty()
+			&& let [single] = n.children.as_slice()
+		{
+			n = single;
+			if single.value().is_some() || single.children.len() > 1 {
 				break;
 			}
 		}
