@@ -272,6 +272,17 @@ fn main() -> io::Result<()> {
 	let mut completions = trie::Trie::new();
 	completions.insert("exit".into());
 	completions.insert("echo".into());
+	completions.insert("type".into());
+	completions.insert("pwd".into());
+	completions.insert("cd".into());
+
+	for program in read_dirs(env_path().into_iter())
+		.filter_map(|file| is_executable_file(file.path()).then(|| file.file_name()))
+	{
+		if let Ok(program) = program.into_string() {
+			completions.insert(program);
+		}
+	}
 
 	loop {
 		let cmd = {

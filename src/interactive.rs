@@ -267,12 +267,13 @@ pub fn next(completions: &crate::trie::Trie) -> io::Result<String> {
 
 					b'\t' => {
 						let prefix = &buf.as_str()[..buf.idx];
-						let comp = completions.complete(prefix);
-
-						if comp.is_empty() {
+						let Some(min) = completions.complete_minimal(prefix) else {
 							write!(o, "\x07")?;
 							_ = o.flush();
-						} else if let &[comp] = comp.as_slice()
+							continue;
+						};
+
+						if let Some(comp) = min.value()
 							&& comp != prefix
 						{
 							let extra = comp
@@ -282,24 +283,29 @@ pub fn next(completions: &crate::trie::Trie) -> io::Result<String> {
 							write!(o, "{extra}")?;
 							refresh = true;
 
-							if buf.is_cursor_at_end() {
+							if min.is_leaf() && buf.is_cursor_at_end() {
 								buf.insert(' ');
 								write!(o, " ")?;
 							}
-						} else {
-							// TODO: suggest tab completion
-							// write!(o, "\x1B7")?;
-							// write!(o, "\n")?;
-							//
-							// eprintln!("{comp:?}");
-							//
-							// write!(o, "\x1B[K")?;
-							// write!(o, "$ {buf}")?;
-							// write!(o, "\x1B8")?;
-							// _ = o.flush();
-							write!(o, "\x07")?;
-							_ = o.flush();
+							continue;
 						}
+
+						let comp = min.collect_values();
+						debug_assert!(comp.len() > 1);
+
+						write!(o, "\x07")?;
+						_ = o.flush();
+
+						// TODO: suggest tab completion
+						// write!(o, "\x1B7")?;
+						// write!(o, "\n")?;
+						//
+						// eprintln!("{comp:?}");
+						//
+						// write!(o, "\x1B[K")?;
+						// write!(o, "$ {buf}")?;
+						// write!(o, "\x1B8")?;
+						// _ = o.flush();
 					}
 
 					b'\x1B' if input.next_if(|&ch| ch == '[').is_some() => {

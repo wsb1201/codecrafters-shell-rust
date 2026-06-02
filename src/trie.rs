@@ -60,28 +60,52 @@ impl Trie {
 		n.value == word
 	}
 
-	fn collect_into<'a>(&'a self, dst: &mut Vec<&'a str>) {
-		if !self.value.is_empty() {
-			dst.push(self.value.as_str());
-		}
-		for n in &self.children {
-			n.collect_into(dst)
-		}
+	pub fn value(&self) -> Option<&str> {
+		(!self.value.is_empty()).then_some(self.value.as_str())
 	}
 
-	pub fn complete<'a>(&'a self, word: &str) -> Vec<&'a str> {
+	pub fn complete_minimal<'a>(&'a self, word: &str) -> Option<&'a Trie> {
 		let mut n = self;
-		let mut v = vec![];
-
 		for key in word.bytes() {
 			if !n.has_key(key) {
-				return vec![];
+				return None;
 			}
 			n = &n.children[n.index(key)];
 		}
+		while let [single] = n.children.as_slice() {
+			if single.children.len() < 2 {
+				n = single;
+			} else {
+				break;
+			}
+		}
+		Some(n)
+	}
 
-		n.collect_into(&mut v);
+	pub fn is_leaf(&self) -> bool {
+		self.children.is_empty()
+	}
+
+	pub fn collect_values<'a>(&'a self) -> Vec<&'a str> {
+		fn collect_into<'a>(n: &'a Trie, dst: &mut Vec<&'a str>) {
+			if let Some(val) = n.value() {
+				dst.push(val);
+			}
+			for n in &n.children {
+				collect_into(n, dst)
+			}
+		}
+
+		let mut v = vec![];
+		collect_into(self, &mut v);
 		v
+	}
+
+	pub fn complete<'a>(&'a self, word: &str) -> Vec<&'a str> {
+		let Some(n) = self.complete_minimal(word) else {
+			return vec![];
+		};
+		n.collect_values()
 	}
 }
 
