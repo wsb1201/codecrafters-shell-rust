@@ -290,22 +290,36 @@ pub fn next(completions: &crate::trie::Trie) -> io::Result<String> {
 							continue;
 						}
 
-						let comp = min.collect_values();
-						debug_assert!(comp.len() > 1);
-
 						write!(o, "\x07")?;
 						_ = o.flush();
 
-						// TODO: suggest tab completion
-						// write!(o, "\x1B7")?;
-						// write!(o, "\n")?;
-						//
-						// eprintln!("{comp:?}");
-						//
-						// write!(o, "\x1B[K")?;
-						// write!(o, "$ {buf}")?;
-						// write!(o, "\x1B8")?;
-						// _ = o.flush();
+						if input.next_if(|&ch| ch == '\t').is_none() {
+							continue;
+						}
+
+						let comp = min.collect_values();
+						debug_assert!(comp.len() > 1);
+
+						write!(o, "\x1B7")?;
+						{
+							writeln!(o)?;
+							let width = 2 + comp.iter().map(|&s| s.len()).max().unwrap();
+							let mut sum = 0;
+							for i in comp {
+								// TODO: dynamic terminal line width
+								if sum + width >= 80 {
+									writeln!(o)?;
+									sum = 0;
+								}
+								write!(o, "{i:width$}")?;
+								sum += width;
+							}
+							writeln!(o)?;
+						}
+						write!(o, "\x1B[K")?;
+						write!(o, "$ {buf}")?;
+						write!(o, "\x1B8")?;
+						_ = o.flush();
 					}
 
 					b'\x1B' if input.next_if(|&ch| ch == '[').is_some() => {
