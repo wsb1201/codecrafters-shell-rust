@@ -1,5 +1,3 @@
-use std::fmt;
-
 #[derive(Debug)]
 pub struct Trie {
 	value: String,
@@ -49,17 +47,6 @@ impl Trie {
 		n.value = word
 	}
 
-	pub fn contains(&self, word: &str) -> bool {
-		let mut n = self;
-		for key in word.bytes() {
-			if !n.has_key(key) {
-				return false;
-			}
-			n = &n.children[n.index(key)];
-		}
-		n.value == word
-	}
-
 	pub fn value(&self) -> Option<&str> {
 		(!self.value.is_empty()).then_some(self.value.as_str())
 	}
@@ -87,7 +74,7 @@ impl Trie {
 		self.children.is_empty()
 	}
 
-	pub fn collect_values<'a>(&'a self) -> Vec<&'a str> {
+	pub fn collect_values(&self) -> Vec<&str> {
 		fn collect_into<'a>(n: &'a Trie, dst: &mut Vec<&'a str>) {
 			if let Some(val) = n.value() {
 				dst.push(val);
@@ -101,19 +88,4 @@ impl Trie {
 		collect_into(self, &mut v);
 		v
 	}
-
-	pub fn complete<'a>(&'a self, word: &str) -> Vec<&'a str> {
-		let Some(n) = self.complete_minimal(word) else {
-			return vec![];
-		};
-		n.collect_values()
-	}
-}
-
-#[test]
-fn test() {
-	let mut t = Trie::new();
-	t.insert("word".into());
-	assert!(t.contains("word"));
-	assert!(t.complete("wo").contains(&"word"));
 }

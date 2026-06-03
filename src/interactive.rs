@@ -1,17 +1,28 @@
+#![allow(unused_imports)]
+
 use std::{
-	fmt,
-	io::{self, Read, Write},
+	borrow::Cow,
+	cell::{Cell, LazyCell},
+	env,
+	ffi::OsStr,
+	fmt, fs,
+	io::{self, BufRead, IsTerminal, Read, Write},
+	iter, mem,
+	os::unix::prelude::*,
+	path::{Path, PathBuf},
+	process,
 };
 
-struct Input<R: io::Read> {
+struct InputChars<R: io::Read> {
 	src: io::Bytes<R>,
 	utf8buf: [u8; 4],
 	utf8len: u8,
 }
 
-impl<R: io::Read> Input<R> {
+impl<R: io::Read> InputChars<R> {
 	fn new(src: R) -> Self {
 		Self {
+			#[expect(clippy::unbuffered_bytes)]
 			src: src.bytes(),
 			utf8buf: [0; _],
 			utf8len: 0,
@@ -19,7 +30,7 @@ impl<R: io::Read> Input<R> {
 	}
 }
 
-impl<R: io::Read> Iterator for Input<R> {
+impl<R: io::Read> Iterator for InputChars<R> {
 	type Item = char;
 	fn next(&mut self) -> Option<Self::Item> {
 		for b in self.src.by_ref().flatten() {
@@ -34,6 +45,48 @@ impl<R: io::Read> Iterator for Input<R> {
 			return Some(ch);
 		}
 		None
+	}
+}
+
+struct Input<R: io::Read> {
+	src: iter::Peekable<InputChars<R>>,
+}
+
+enum InputData {
+	Char(char),
+	CsiSeq(String),
+}
+
+impl<R: io::Read> Input<R> {
+	fn new(src: R) -> Self {
+		Self {
+			src: InputChars::new(src).peekable(),
+		}
+	}
+
+	pub fn next_if(&mut self, f: impl FnOnce(char) -> bool) -> Option<char> {
+		self.src.next_if(|&ch| f(ch))
+	}
+}
+
+impl<R: io::Read> Iterator for Input<R> {
+	type Item = InputData;
+	fn next(&mut self) -> Option<Self::Item> {
+		match self.src.next()? {
+			// Introduce an ANSI escape sequence.
+			'\x1B' if self.src.next_if(|&ch| ch == '[').is_some() => {
+				let mut csibuf = String::new();
+				for ch in self.src.by_ref() {
+					csibuf.push(ch);
+					if ('\x40'..='\x7E').contains(&ch) {
+						return Some(InputData::CsiSeq(csibuf));
+					}
+				}
+				None
+			}
+
+			ch => Some(InputData::Char(ch)),
+		}
 	}
 }
 
@@ -83,10 +136,6 @@ impl Buffer {
 		doit
 	}
 
-	fn backspace_delete(&mut self) -> bool {
-		self.cursor_decr() && self.delete()
-	}
-
 	fn is_cursor_at_end(&self) -> bool {
 		self.idx == self.len()
 	}
@@ -132,7 +181,7 @@ impl Buffer {
 		self.idx += s.len();
 	}
 
-	const fn len(&self) -> usize {
+	fn len(&self) -> usize {
 		self.buf.len()
 	}
 
@@ -141,305 +190,217 @@ impl Buffer {
 		self.idx = 0;
 	}
 
-	const fn as_str(&self) -> &str {
+	fn as_str(&self) -> &str {
 		self.buf.as_str()
 	}
 }
 
-pub fn next(completions: &crate::trie::Trie) -> io::Result<String> {
-	let mut input = Input::new(io::stdin().lock()).peekable();
-	let mut o = io::stdout().lock();
+struct Terminal<R: io::Read, W: io::Write> {
+	input: Input<R>,
+	out: W,
+	buf: Buffer,
+}
 
-	let mut buf = Buffer::new();
-	let mut csi: Option<String> = None;
+impl<R: io::Read, W: io::Write> Terminal<R, W> {
+	fn new(i: R, o: W) -> Self {
+		Self {
+			input: Input::new(i),
+			out: o,
+			buf: Buffer::new(),
+		}
+	}
 
-	loop {
-		write!(o, "$ ")?;
-		_ = o.flush();
+	fn refresh(&mut self) -> io::Result<()> {
+		write!(
+			self.out,
+			concat!(
+				"\x1B7",  // Save cursor position.
+				"\x1B[K", // Erase from cursor to end of line.
+				"{}",     // Write updated text
+				"\x1B8"   // Restore saved cursor position.
+			),
+			&self.buf.as_str()[self.buf.idx..]
+		)?;
+		self.flush()
+	}
 
-		let mut refresh = false;
-		loop {
-			if refresh {
-				refresh = false;
-				write!(o, "\x1B7")?;
-				write!(o, "\x1B[K")?;
-				write!(o, "{}", &buf.as_str()[buf.idx..])?;
-				write!(o, "\x1B8")?;
-				_ = o.flush();
-			}
+	fn flush(&mut self) -> io::Result<()> {
+		self.out.flush()
+	}
 
-			let Some(ch) = input.next() else {
-				return Err(io::ErrorKind::UnexpectedEof.into());
-			};
+	fn alert(&mut self) -> io::Result<()> {
+		write!(self.out, "\x07")?;
+		self.flush()
+	}
 
-			if let Some(cmd) = &mut csi {
-				cmd.push(ch);
+	fn cursor_right(&mut self) -> io::Result<()> {
+		if self.buf.cursor_incr() {
+			write!(self.out, "\x1B[C")?;
+			self.flush()
+		} else {
+			self.alert()
+		}
+	}
 
-				if ('\x40'..='\x7E').contains(&ch) {
-					match ch {
-						'A' => {
-							// UP
-							write!(o, "\x07")?;
-							_ = o.flush();
-						}
-						'B' => {
-							// DOWN
-							write!(o, "\x07")?;
-							_ = o.flush();
-						}
-						'C' => {
-							// RIGHT
-							if buf.cursor_incr() {
-								write!(o, "\x1B[{cmd}")?;
-							} else {
-								write!(o, "\x07")?;
-							}
-							_ = o.flush();
-						}
-						'D' => {
-							// LEFT
-							if buf.cursor_decr() {
-								write!(o, "\x1B[{cmd}")?;
-							} else {
-								write!(o, "\x07")?;
-							}
-							_ = o.flush();
-						}
-						'H' => {
-							// HOME
-							if buf.cursor_to_start() {
-								write!(o, "\x1B[3G")?;
-							} else {
-								write!(o, "\x07")?;
-							}
-							_ = o.flush();
-						}
-						'F' => {
-							// END
-							if buf.cursor_to_end() {
-								let col = 3 + buf.as_str().chars().count();
-								write!(o, "\x1B[{col}G")?;
-							} else {
-								write!(o, "\x07")?;
-							}
-							_ = o.flush();
-						}
-						'~' if cmd == "2~" => {
-							// INSERT
-							buf.insert_mode = !buf.insert_mode;
-						}
-						'~' if cmd == "3~" => {
-							// DELETE
-							if buf.delete() {
-								refresh = true;
-							} else {
-								write!(o, "\x07")?;
-								_ = o.flush();
-							}
-						}
-						'~' if cmd == "5~" => {
-							// PG UP
-							write!(o, "\x07")?;
-							_ = o.flush();
-						}
-						'~' if cmd == "6~" => {
-							// PG DN
-							write!(o, "\x07")?;
-							_ = o.flush();
-						}
-						_ => (),
-					}
-					csi.take();
-				}
-				continue;
-			}
+	fn cursor_left(&mut self) -> io::Result<()> {
+		if self.buf.cursor_decr() {
+			write!(self.out, "\x1B[D")?;
+			self.flush()
+		} else {
+			self.alert()
+		}
+	}
 
-			if ch < '\x20' {
-				// ASCII C0
-				match ch as u8 {
-					b'\n' => {
-						writeln!(o)?;
-						let ret = buf.to_string();
-						buf.clear();
-						return Ok(ret);
-					}
+	fn cursor_home(&mut self) -> io::Result<()> {
+		if self.buf.cursor_to_start() {
+			write!(self.out, "\x1B[3G")?;
+			self.flush()
+		} else {
+			self.alert()
+		}
+	}
 
-					b'\t' => {
-						let prefix = &buf.as_str()[..buf.idx];
-						let Some(min) = completions.complete_minimal(prefix) else {
-							write!(o, "\x07")?;
-							_ = o.flush();
-							continue;
-						};
+	fn cursor_end(&mut self) -> io::Result<()> {
+		if self.buf.cursor_to_end() {
+			let col = 3 + self.buf.as_str().chars().count();
+			write!(self.out, "\x1B[{col}G")?;
+			self.flush()
+		} else {
+			self.alert()
+		}
+	}
 
-						if let Some(s) = min.value() {
-							let extra = s.strip_prefix(prefix).unwrap();
-							buf.insert_str(extra);
-							write!(o, "{extra}")?;
-
-							if !buf.is_cursor_at_end() {
-								write!(o, "\x1B7")?;
-								write!(o, "\x1B[K")?;
-								write!(o, "{}", &buf.as_str()[buf.idx..])?;
-								write!(o, "\x1B8")?;
-								refresh = false;
-							} else if min.is_leaf() {
-								buf.insert(' ');
-								write!(o, " ")?;
-							}
-
-							if min.is_leaf() {
-								_ = o.flush();
-								continue;
-							}
-						}
-
-						write!(o, "\x07")?;
-						_ = o.flush();
-
-						while input.next_if(|&ch| ch == '\t').is_some() {
-							let comp = min.collect_values();
-							debug_assert!(comp.len() > 1);
-
-							write!(o, "\x1B7")?;
-							{
-								writeln!(o)?;
-
-								let width = 2 + comp.iter().map(|&s| s.len()).max().unwrap();
-								let mut sum = 0;
-								for i in comp {
-									// TODO: dynamic terminal line width
-									if sum + width >= 80 {
-										writeln!(o)?;
-										sum = 0;
-									}
-									write!(o, "{i:width$}")?;
-									sum += width;
-								}
-								writeln!(o)?;
-							}
-							write!(o, "\x1B[K")?;
-							write!(o, "$ {buf}")?;
-							write!(o, "\x1B8")?;
-							_ = o.flush();
-						}
-					}
-
-					b'\x1B' if input.next_if(|&ch| ch == '[').is_some() => {
-						csi = Some(String::new());
-					}
-
-					b'\r' => (),      // Move to column zero while staying on the same line.
-					b'\0' => (),      // Does nothing.
-					0x01..0x04 => (), // Does nothing.
-					0x04 => (),       // May place terminals on standby.
-					0x05..0x08 => (), // Does nothing.
-					0x08 => (), // Move one position leftwards. Next character may replace the character that was there.
-					0x0B => (), // Move down to the next vertical tab stop.
-					0x0C => (), // Move down to the top of the next page.
-					0x0E..0x1B => (), // Does nothing.
-					0x1B => (), // Introduce an ANSI escape sequence.
-					0x1C..0x20 => (), // Does nothing.
-					_ => unreachable!(),
-				}
-
-				continue;
-			}
-
-			if ch == '\x7F' {
-				// BACKSPACE
-				if buf.backspace_delete() {
-					write!(o, "\x08")?;
-					refresh = true;
-				} else {
-					write!(o, "\x07")?;
-					_ = o.flush();
-				}
-				continue;
-			}
-
-			write!(o, "{ch}")?;
-			_ = o.flush();
-
-			if buf.insert(ch) && !buf.is_cursor_at_end() {
-				refresh = true;
-			}
+	fn backspace(&mut self) -> io::Result<()> {
+		if self.buf.cursor_decr() && self.buf.delete() {
+			write!(self.out, "\x08")?;
+			self.refresh()
+		} else {
+			self.alert()
 		}
 	}
 }
 
-fn get_caret_notation(ch: u8) -> &'static str {
-	match ch {
-		b'\0' => "^@",
-		0x01 => "^A",
-		0x02 => "^B",
-		0x03 => "^C",
-		0x04 => "^D",
-		0x05 => "^E",
-		0x06 => "^F",
-		0x07 => "^G",
-		0x08 => "^H",
-		b'\t' => "^I",
-		b'\n' => "^J",
-		0x0B => "^K",
-		0x0C => "^L",
-		b'\r' => "^M",
-		0x0E => "^N",
-		0x0F => "^O",
-		0x10 => "^P",
-		0x11 => "^Q",
-		0x12 => "^R",
-		0x13 => "^S",
-		0x14 => "^T",
-		0x15 => "^U",
-		0x16 => "^V",
-		0x17 => "^W",
-		0x18 => "^X",
-		0x19 => "^Y",
-		0x1A => "^Z",
-		0x1B => "^[",
-		0x1C => "^\\",
-		0x1D => "^]",
-		0x1E => "^^",
-		0x1F => "^_",
-		_ => "",
-	}
-}
+pub(crate) fn prompt(completions: &crate::trie::Trie) -> io::Result<String> {
+	let mut t = Terminal::new(io::stdin().lock(), io::stdout().lock());
 
-fn get_control_picture(ch: u8) -> char {
-	match ch {
-		b'\0' => '␀',
-		0x01 => '␁',
-		0x02 => '␂',
-		0x03 => '␃',
-		0x04 => '␄',
-		0x05 => '␅',
-		0x06 => '␆',
-		0x07 => '␇',
-		0x08 => '␈',
-		b'\t' => '␉',
-		b'\n' => '␊',
-		0x0B => '␋',
-		0x0C => '␌',
-		b'\r' => '␍',
-		0x0E => '␎',
-		0x0F => '␏',
-		0x10 => '␐',
-		0x11 => '␑',
-		0x12 => '␒',
-		0x13 => '␓',
-		0x14 => '␔',
-		0x15 => '␕',
-		0x16 => '␖',
-		0x17 => '␗',
-		0x18 => '␘',
-		0x19 => '␙',
-		0x1A => '␚',
-		0x1B => '␛',
-		0x1C => '␜',
-		0x1D => '␝',
-		0x1E => '␞',
-		0x1F => '␟',
-		_ => '\0',
+	write!(t.out, "$ ")?;
+	_ = t.flush();
+
+	loop {
+		match (t.input.next()).ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))? {
+			InputData::CsiSeq(seq) => match seq.as_str() {
+				"A" => _ = t.alert(),
+				"B" => _ = t.alert(),
+				"C" => t.cursor_right()?,
+				"D" => t.cursor_left()?,
+				"H" => t.cursor_home()?,
+				"F" => t.cursor_end()?,
+				"2~" => t.buf.insert_mode = !t.buf.insert_mode,
+				"3~" => {
+					if t.buf.delete() {
+						t.refresh()?;
+					} else {
+						_ = t.alert();
+					}
+				}
+				"5~" => _ = t.alert(),
+				"6~" => _ = t.alert(),
+				_ => (),
+			},
+
+			InputData::Char('\n') => {
+				writeln!(t.out)?;
+				let ret = t.buf.to_string();
+				t.buf.clear();
+				return Ok(ret);
+			}
+
+			InputData::Char('\t') => {
+				let prefix = &t.buf.as_str()[..t.buf.idx];
+				let Some(min) = completions.complete_minimal(prefix) else {
+					write!(t.out, "\x07")?;
+					_ = t.flush();
+					continue;
+				};
+
+				if let Some(s) = min.value() {
+					let extra = s.strip_prefix(prefix).unwrap();
+					t.buf.insert_str(extra);
+					write!(t.out, "{extra}")?;
+
+					if !t.buf.is_cursor_at_end() {
+						t.refresh()?;
+					} else if min.is_leaf() {
+						t.buf.insert(' ');
+						write!(t.out, " ")?;
+					}
+
+					if min.is_leaf() {
+						_ = t.flush();
+						continue;
+					}
+				}
+
+				t.alert()?;
+
+				while t.input.next_if(|ch| ch == '\t').is_some() {
+					let comp = min.collect_values();
+					debug_assert!(comp.len() > 1);
+
+					write!(t.out, "\x1B7")?;
+					{
+						writeln!(t.out)?;
+
+						let width = 2 + comp.iter().map(|&s| s.len()).max().unwrap();
+						let mut sum = 0;
+						for i in comp {
+							// TODO: dynamic terminal line width
+							if sum + width >= 80 {
+								writeln!(t.out)?;
+								sum = 0;
+							}
+							write!(t.out, "{i:width$}")?;
+							sum += width;
+						}
+						writeln!(t.out)?;
+					}
+					write!(t.out, "\x1B[K")?;
+					write!(t.out, "$ {}", t.buf)?;
+					write!(t.out, "\x1B8")?;
+					_ = t.flush();
+				}
+			}
+
+			InputData::Char('\r') => t.cursor_home()?,
+
+			InputData::Char('\x04') => {
+				// May place terminals on standby.
+				write!(t.out, "\x04")?;
+			}
+
+			InputData::Char('\x08' | '\x7F') => t.backspace()?,
+
+			InputData::Char('\x0B') => {
+				// Move down to the next vertical tab stop.
+			}
+
+			InputData::Char('\x0C') => {
+				// Move down to the top of the next page.
+			}
+
+			InputData::Char(..'\x20') => {
+				// Unhandled ASCII C0. Does nothing.
+			}
+
+			InputData::Char(ch @ '\x20'..) => {
+				write!(t.out, "{ch}")?;
+
+				if t.buf.insert(ch) && !t.buf.is_cursor_at_end() {
+					t.refresh()?;
+				} else {
+					_ = t.flush();
+				}
+			}
+		}
 	}
 }
