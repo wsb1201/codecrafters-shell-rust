@@ -15,11 +15,6 @@ mod parse;
 mod termios;
 mod trie;
 
-struct Completions {
-	commands: trie::Trie,
-	files: trie::Trie,
-}
-
 fn main() -> io::Result<()> {
 	let (i, mut o, mut e) = (io::stdin(), io::stdout(), io::stderr());
 	let termios_mode = i
@@ -27,24 +22,21 @@ fn main() -> io::Result<()> {
 		.then(|| TermiosMode::new(i.as_fd()))
 		.transpose()?;
 
-	let mut completions = Completions {
-		commands: {
-			let mut commands = trie::Trie::new();
-			commands.insert("exit".into());
-			commands.insert("echo".into());
-			commands.insert("type".into());
-			commands.insert("pwd".into());
-			commands.insert("cd".into());
-			for program in read_dirs(env_path().into_iter())
-				.filter_map(|file| is_executable_file(file.path()).then(|| file.file_name()))
-			{
-				if let Ok(program) = program.into_string() {
-					commands.insert(program);
-				}
+	let command_completions = {
+		let mut commands = trie::Trie::new();
+		commands.insert("exit".into());
+		commands.insert("echo".into());
+		commands.insert("type".into());
+		commands.insert("pwd".into());
+		commands.insert("cd".into());
+		for program in read_dirs(env_path().into_iter())
+			.filter_map(|file| is_executable_file(file.path()).then(|| file.file_name()))
+		{
+			if let Ok(program) = program.into_string() {
+				commands.insert(program);
 			}
-			commands
-		},
-		files: trie::Trie::new(),
+		}
+		commands
 	};
 
 	loop {
@@ -52,15 +44,7 @@ fn main() -> io::Result<()> {
 			env::current_dir().expect("error getting the current working directory")
 		});
 
-		for ent in fs::read_dir(&*working_dir).into_iter().flatten().flatten() {
-			if ent.file_type().is_ok_and(|f| f.is_file())
-				&& let Ok(name) = ent.file_name().into_string()
-			{
-				completions.files.insert(name);
-			}
-		}
-
-		let cmd = interactive::prompt(&completions)?;
+		let cmd = interactive::prompt(&command_completions)?;
 		let cmd = parse::parse_line(cmd.as_str());
 
 		let mut stdout_f = cmd

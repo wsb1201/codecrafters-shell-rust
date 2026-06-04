@@ -364,7 +364,7 @@ impl<R: io::Read, W: io::Write> Terminal<R, W> {
 	}
 }
 
-pub(crate) fn prompt(completions: &crate::Completions) -> io::Result<String> {
+pub(crate) fn prompt(command_completions: &crate::trie::Trie) -> io::Result<String> {
 	let mut t = Terminal::new(io::stdin().lock(), io::stdout().lock());
 
 	write!(t.out, "$ ")?;
@@ -401,63 +401,139 @@ pub(crate) fn prompt(completions: &crate::Completions) -> io::Result<String> {
 
 			InputData::Char('\t') => {
 				let prefix = t.buf.get_cursor_prefix_word();
-				let root = if t.buf.is_cursor_in_first_word() {
-					&completions.commands
-				} else {
-					&completions.files
-				};
 
-				let Some(min) = root.complete_minimal(prefix) else {
-					write!(t.out, "\x07")?;
-					_ = t.flush();
-					continue;
-				};
-
-				if let Some(s) = min.value() {
-					let extra = s.strip_prefix(prefix).unwrap();
-					t.buf.insert_str(extra);
-					write!(t.out, "{extra}")?;
-
-					if !t.buf.is_cursor_at_end() {
-						t.refresh()?;
-					} else if min.is_leaf() {
-						t.buf.insert(' ');
-						write!(t.out, " ")?;
-					}
-
-					if min.is_leaf() {
-						_ = t.flush();
+				if t.buf.is_cursor_in_first_word() {
+					let Some(min) = command_completions.complete_minimal(prefix) else {
+						t.alert()?;
 						continue;
-					}
-				}
+					};
 
-				t.alert()?;
+					if let Some(s) = min.value() {
+						let extra = s.strip_prefix(prefix).unwrap();
+						t.buf.insert_str(extra);
+						write!(t.out, "{extra}")?;
 
-				while t.input.next_if(|ch| ch == '\t').is_some() {
-					let comp = min.collect_values();
-					debug_assert!(comp.len() > 1);
-
-					write!(t.out, "\x1B7")?;
-					{
-						writeln!(t.out)?;
-
-						let width = 2 + comp.iter().map(|&s| s.len()).max().unwrap();
-						let mut sum = 0;
-						for i in comp {
-							// TODO: dynamic terminal line width
-							if sum + width >= 80 {
-								writeln!(t.out)?;
-								sum = 0;
-							}
-							write!(t.out, "{i:width$}")?;
-							sum += width;
+						if !t.buf.is_cursor_at_end() {
+							t.refresh()?;
+						} else if min.is_leaf() {
+							t.buf.insert(' ');
+							write!(t.out, " ")?;
 						}
-						writeln!(t.out)?;
+
+						if min.is_leaf() {
+							_ = t.flush();
+							continue;
+						}
 					}
-					write!(t.out, "\x1B[K")?;
-					write!(t.out, "$ {}", t.buf)?;
-					write!(t.out, "\x1B8")?;
-					_ = t.flush();
+
+					t.alert()?;
+
+					while t.input.next_if(|ch| ch == '\t').is_some() {
+						let comp = min.collect_values();
+						debug_assert!(comp.len() > 1);
+
+						write!(t.out, "\x1B7")?;
+						{
+							writeln!(t.out)?;
+
+							let width = 2 + comp.iter().map(|&s| s.len()).max().unwrap();
+							let mut sum = 0;
+							for i in comp {
+								// TODO: dynamic terminal line width
+								if sum + width >= 80 {
+									writeln!(t.out)?;
+									sum = 0;
+								}
+								write!(t.out, "{i:width$}")?;
+								sum += width;
+							}
+							writeln!(t.out)?;
+						}
+						write!(t.out, "\x1B[K")?;
+						write!(t.out, "$ {}", t.buf)?;
+						write!(t.out, "\x1B8")?;
+						_ = t.flush();
+					}
+				} else {
+					let mut completions = crate::trie::Trie::new();
+
+					let (dir, prefix) = if let Some(p) = prefix.strip_prefix('/') {
+						if p.contains('/') {
+							prefix.rsplit_once('/').unwrap()
+						} else {
+							("/", p)
+						}
+					} else {
+						prefix.rsplit_once('/').unwrap_or((".", prefix))
+					};
+
+					for ent in fs::read_dir(dir).into_iter().flatten().flatten() {
+						let name = || ent.file_name().into_string();
+						if ent.file_type().is_ok_and(|f| f.is_file())
+							&& let Ok(name) = name()
+						{
+							completions.insert(name);
+						} else if ent.file_type().is_ok_and(|f| f.is_dir())
+							&& let Ok(name) = name()
+						{
+							completions.insert(format!("{name}/"));
+						}
+					}
+
+					let Some(min) = completions.complete_minimal(prefix) else {
+						t.alert()?;
+						continue;
+					};
+
+					if let Some(s) = min.value() {
+						let extra = s.strip_prefix(prefix).unwrap();
+						t.buf.insert_str(extra);
+						write!(t.out, "{extra}")?;
+
+						if !t.buf.is_cursor_at_end() {
+							t.refresh()?;
+						} else if min.is_leaf() && !s.ends_with('/') {
+							t.buf.insert(' ');
+							write!(t.out, " ")?;
+						}
+
+						if min.is_leaf() {
+							_ = t.flush();
+							continue;
+						}
+					}
+
+					t.alert()?;
+
+					while t.input.next_if(|ch| ch == '\t').is_some() {
+						let comp = min.collect_values();
+						if comp.is_empty() {
+							t.alert()?;
+							continue;
+						}
+
+						write!(t.out, "\x1B7")?;
+						{
+							writeln!(t.out)?;
+
+							let width = 2 + comp.iter().map(|&s| s.len()).max().unwrap();
+							let mut sum = 0;
+							for i in comp {
+								// TODO: dynamic terminal line width
+								if sum + width >= 80 {
+									writeln!(t.out)?;
+									sum = 0;
+								}
+								write!(t.out, "{i:width$}")?;
+								sum += width;
+							}
+							writeln!(t.out)?;
+						}
+						write!(t.out, "\x1B[K")?;
+						write!(t.out, "$ {}", t.buf)?;
+						write!(t.out, "\x1B8")?;
+						_ = t.flush();
+					}
 				}
 			}
 
