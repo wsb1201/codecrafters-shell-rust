@@ -181,6 +181,90 @@ impl Buffer {
 		self.idx += s.len();
 	}
 
+	fn get_cursor_prefix_word(&self) -> &str {
+		const META_CHARS: &[char] = &[' ', '\t', '\n', '(', ')', '<', '>', '|', '&', ';'];
+
+		let mut s = &self.buf[..self.idx];
+		let mut e = s;
+
+		loop {
+			if e.starts_with(META_CHARS) {
+				e = e.trim_start_matches(META_CHARS);
+				s = e;
+			}
+
+			if e.is_empty() {
+				return s;
+			}
+
+			if let Some(sub) = e.strip_prefix('\'') {
+				let Some((_, rem)) = sub.split_once('\'') else {
+					return s;
+				};
+				e = rem;
+			} else if let Some(sub) = e.strip_prefix('"') {
+				e = sub;
+				loop {
+					let Some(p) = e.find(['"', '\\']) else { return s };
+					let (_, b) = e.split_at(p);
+					let ch = b.chars().next().unwrap();
+					e = b.strip_prefix(ch).unwrap();
+					if ch == '"' {
+						break;
+					}
+				}
+			} else if let Some(sub) = e.strip_prefix('\\') {
+				let Some(ch) = sub.chars().next() else { return s };
+				e = sub.strip_prefix(ch).unwrap();
+			} else {
+				let Some(ch) = e.chars().next() else { return s };
+				e = e.strip_prefix(ch).unwrap();
+			}
+		}
+	}
+
+	fn is_cursor_in_first_word(&self) -> bool {
+		const META_CHARS: &[char] = &[' ', '\t', '\n', '(', ')', '<', '>', '|', '&', ';'];
+
+		let mut s = self.buf.as_str()[..self.idx].trim_ascii_start();
+
+		if s.ends_with(META_CHARS) {
+			return false;
+		}
+
+		loop {
+			if s.is_empty() {
+				return true;
+			} else if s.starts_with(META_CHARS) {
+				return false;
+			}
+
+			if let Some(sub) = s.strip_prefix('\'') {
+				let Some((_, rem)) = sub.split_once('\'') else {
+					return true;
+				};
+				s = rem;
+			} else if let Some(sub) = s.strip_prefix('"') {
+				s = sub;
+				loop {
+					let Some(p) = s.find(['"', '\\']) else { return true };
+					let (_, b) = s.split_at(p);
+					let ch = b.chars().next().unwrap();
+					s = b.strip_prefix(ch).unwrap();
+					if ch == '"' {
+						break;
+					}
+				}
+			} else if let Some(sub) = s.strip_prefix('\\') {
+				let Some(ch) = sub.chars().next() else { return true };
+				s = sub.strip_prefix(ch).unwrap();
+			} else {
+				let Some(ch) = s.chars().next() else { return true };
+				s = s.strip_prefix(ch).unwrap();
+			}
+		}
+	}
+
 	fn len(&self) -> usize {
 		self.buf.len()
 	}
@@ -280,7 +364,7 @@ impl<R: io::Read, W: io::Write> Terminal<R, W> {
 	}
 }
 
-pub(crate) fn prompt(completions: &crate::trie::Trie) -> io::Result<String> {
+pub(crate) fn prompt(completions: &crate::Completions) -> io::Result<String> {
 	let mut t = Terminal::new(io::stdin().lock(), io::stdout().lock());
 
 	write!(t.out, "$ ")?;
@@ -316,8 +400,14 @@ pub(crate) fn prompt(completions: &crate::trie::Trie) -> io::Result<String> {
 			}
 
 			InputData::Char('\t') => {
-				let prefix = &t.buf.as_str()[..t.buf.idx];
-				let Some(min) = completions.complete_minimal(prefix) else {
+				let prefix = t.buf.get_cursor_prefix_word();
+				let root = if t.buf.is_cursor_in_first_word() {
+					&completions.commands
+				} else {
+					&completions.files
+				};
+
+				let Some(min) = root.complete_minimal(prefix) else {
 					write!(t.out, "\x07")?;
 					_ = t.flush();
 					continue;
