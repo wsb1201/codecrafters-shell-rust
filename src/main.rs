@@ -272,5 +272,10 @@ fn builtin_cmd_type(o: &mut dyn Write, e: &mut dyn Write, args: &[&str]) -> io::
 }
 
 fn builtin_cmd_complete(o: &mut dyn Write, e: &mut dyn Write, args: &[&str]) -> io::Result<()> {
-	unimplemented!()
+	match args {
+		[] => unimplemented!(),
+		["-p", cmd] => writeln!(o, "complete: {cmd}: no completion specification"),
+
+		_ => unimplemented!(),
+	}
 }
