@@ -1,14 +1,20 @@
 #[derive(Debug)]
 pub struct Trie {
-	value: String,
+	value: Option<TrieValue>,
 	bits: [u128; 2],
 	children: Vec<Trie>,
+}
+
+#[derive(Debug)]
+struct TrieValue {
+	value: String,
+	partial: bool,
 }
 
 impl Trie {
 	pub fn new() -> Self {
 		Self {
-			value: String::new(),
+			value: None,
 			bits: [0; _],
 			children: vec![],
 		}
@@ -34,21 +40,42 @@ impl Trie {
 	}
 
 	pub fn insert(&mut self, word: String) {
+		assert!(!word.is_empty());
 		let mut n = self;
-		for key in word.bytes() {
+
+		for (depth, key) in word.bytes().enumerate() {
 			let i = n.index(key);
+
 			if n.has_key(key) {
 				n = &mut n.children[i];
-			} else {
-				n.set_key_bit(key);
-				n = n.children.insert_mut(i, Self::new());
+				continue;
 			}
+
+			if !n.children.is_empty() {
+				if let Some(value) = &mut n.value {
+					debug_assert_eq!(value.value, word[..depth]);
+				} else {
+					n.value = Some(TrieValue {
+						value: word[..depth].to_string(),
+						partial: true,
+					})
+				}
+			}
+
+			n.set_key_bit(key);
+			n = n.children.insert_mut(i, Self::new());
 		}
-		n.value = word
+
+		if let Some(value) = &mut n.value {
+			debug_assert_eq!(value.value, word);
+			value.partial = false;
+		} else {
+			n.value = Some(TrieValue { value: word, partial: false })
+		}
 	}
 
 	pub fn value(&self) -> Option<&str> {
-		(!self.value.is_empty()).then_some(self.value.as_str())
+		self.value.as_ref().map(|val| val.value.as_str())
 	}
 
 	pub fn complete_minimal<'a>(&'a self, word: &str) -> Option<&'a Trie> {
@@ -59,7 +86,12 @@ impl Trie {
 			}
 			n = &n.children[n.index(key)];
 		}
-		while n.value.is_empty()
+		Some(n)
+	}
+
+	pub fn complete<'a>(&'a self, word: &str) -> Option<&'a Trie> {
+		let mut n = self.complete_minimal(word)?;
+		while n.value.is_none()
 			&& let [single] = n.children.as_slice()
 		{
 			n = single;
@@ -76,8 +108,10 @@ impl Trie {
 
 	pub fn collect_values(&self) -> Vec<&str> {
 		fn collect_into<'a>(n: &'a Trie, dst: &mut Vec<&'a str>) {
-			if let Some(val) = n.value() {
-				dst.push(val);
+			if let Some(val) = &n.value
+				&& !val.partial
+			{
+				dst.push(&val.value);
 			}
 			for n in &n.children {
 				collect_into(n, dst)

@@ -295,16 +295,15 @@ impl<R: io::Read, W: io::Write> Terminal<R, W> {
 	}
 
 	fn refresh(&mut self) -> io::Result<()> {
-		write!(
-			self.out,
-			concat!(
-				"\x1B7",  // Save cursor position.
-				"\x1B[K", // Erase from cursor to end of line.
-				"{}",     // Write updated text
-				"\x1B8"   // Restore saved cursor position.
-			),
-			&self.buf.as_str()[self.buf.idx..]
-		)?;
+		write!(self.out, "\r\x1b[2K$ {}", self.buf.as_str())?;
+
+		// Column 3 is immediately after "$ ".
+		write!(self.out, "\x1b[3G")?;
+
+		if self.buf.idx > 0 {
+			write!(self.out, "\x1b[{}C", self.buf.idx)?;
+		}
+
 		self.flush()
 	}
 
@@ -403,7 +402,7 @@ pub(crate) fn prompt(command_completions: &crate::trie::Trie) -> io::Result<Stri
 				let prefix = t.buf.get_cursor_prefix_word();
 
 				if t.buf.is_cursor_in_first_word() {
-					let Some(min) = command_completions.complete_minimal(prefix) else {
+					let Some(min) = command_completions.complete(prefix) else {
 						t.alert()?;
 						continue;
 					};
@@ -432,7 +431,6 @@ pub(crate) fn prompt(command_completions: &crate::trie::Trie) -> io::Result<Stri
 						let comp = min.collect_values();
 						debug_assert!(comp.len() > 1);
 
-						write!(t.out, "\x1B7")?;
 						{
 							writeln!(t.out)?;
 
@@ -449,9 +447,11 @@ pub(crate) fn prompt(command_completions: &crate::trie::Trie) -> io::Result<Stri
 							}
 							writeln!(t.out)?;
 						}
-						write!(t.out, "\x1B[K")?;
-						write!(t.out, "$ {}", t.buf)?;
-						write!(t.out, "\x1B8")?;
+						write!(t.out, "\r\x1b[2K$ {}", t.buf)?;
+						write!(t.out, "\x1b[3G")?;
+						if t.buf.idx > 0 {
+							write!(t.out, "\x1b[{}C", t.buf.idx)?;
+						}
 						_ = t.flush();
 					}
 				} else {
@@ -480,7 +480,7 @@ pub(crate) fn prompt(command_completions: &crate::trie::Trie) -> io::Result<Stri
 						}
 					}
 
-					let Some(min) = completions.complete_minimal(prefix) else {
+					let Some(min) = completions.complete(prefix) else {
 						t.alert()?;
 						continue;
 					};
@@ -512,7 +512,6 @@ pub(crate) fn prompt(command_completions: &crate::trie::Trie) -> io::Result<Stri
 							continue;
 						}
 
-						write!(t.out, "\x1B7")?;
 						{
 							writeln!(t.out)?;
 
@@ -529,9 +528,11 @@ pub(crate) fn prompt(command_completions: &crate::trie::Trie) -> io::Result<Stri
 							}
 							writeln!(t.out)?;
 						}
-						write!(t.out, "\x1B[K")?;
-						write!(t.out, "$ {}", t.buf)?;
-						write!(t.out, "\x1B8")?;
+
+						write!(t.out, "\r\x1b[2K$ {}", t.buf)?;
+						write!(t.out, "\x1b[3G")?;
+						write!(t.out, "\x1b[{}C", t.buf.idx)?;
+						t.flush()?;
 						_ = t.flush();
 					}
 				}
