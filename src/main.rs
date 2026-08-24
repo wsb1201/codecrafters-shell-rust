@@ -29,6 +29,7 @@ fn main() -> io::Result<()> {
 		commands.insert("type".into());
 		commands.insert("pwd".into());
 		commands.insert("cd".into());
+		commands.insert("complete".into());
 		for program in read_dirs(env_path().into_iter())
 			.filter_map(|file| is_executable_file(file.path()).then(|| file.file_name()))
 		{
@@ -101,6 +102,9 @@ fn main() -> io::Result<()> {
 
 			// builtin command `cd`
 			["cd", args @ ..] => builtin_cmd_cd(&mut o, &mut e, args)?,
+
+			// builtin command `complete`
+			["complete", args @ ..] => builtin_cmd_complete(&mut o, &mut e, args)?,
 
 			// external program?
 			[program, args @ ..] if find_executable(program).is_some() => {
@@ -249,7 +253,10 @@ fn builtin_cmd_type(o: &mut dyn Write, e: &mut dyn Write, args: &[&str]) -> io::
 	match args {
 		[] => Ok(()),
 
-		[builtin @ ("exit" | "echo" | "type" | "pwd" | "cd"), ..] => {
+		[
+			builtin @ ("exit" | "echo" | "type" | "pwd" | "cd" | "complete"),
+			..,
+		] => {
 			writeln!(o, "{builtin} is a shell builtin")
 		}
 
@@ -262,4 +269,8 @@ fn builtin_cmd_type(o: &mut dyn Write, e: &mut dyn Write, args: &[&str]) -> io::
 		// No executable was found in PATH.
 		[unknown, ..] => writeln!(e, "{unknown}: not found"),
 	}
+}
+
+fn builtin_cmd_complete(o: &mut dyn Write, e: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+	unimplemented!()
 }
